@@ -6,7 +6,6 @@ const INK    = "#0D1117";
 const MUTED  = "#5B6470";
 const BORDER = "#E8E7E2";
 const CREAM  = "#FAF9F6";
-const GREEN  = { text:"#1B7A4B", bg:"#E9F7EF", border:"#BBE5CF" };
 
 function Code({ children }) {
   return <code style={{ fontFamily:"monospace",fontSize:13,background:CREAM,border:`1px solid ${BORDER}`,borderRadius:5,padding:"2px 7px",color:"#C8841A" }}>{children}</code>;
@@ -64,7 +63,7 @@ export default function DocsPage() {
 
         {/* Sidebar */}
         <div style={{ width:180,flexShrink:0,display:"none" }} className="ph-sidebar">
-          {[["Overview","#overview"],["Auth","#auth"],["Endpoints","#endpoints"],["Preflight","#preflight"],["Payment","#payment"],["Disputes","#disputes"],["Audit","#audit"],["Contract","#contract"],["Compliance","#compliance"]].map(([l,h])=>(
+          {[["Overview","#overview"],["Auth","#auth"],["Endpoints","#endpoints"],["Register","#payment"],["Disputes","#disputes"],["Audit","#audit"],["Contract","#contract"],["Design notes","#design"]].map(([l,h])=>(
             <a key={h} href={h} style={{ display:"block",fontSize:13.5,color:MUTED,textDecoration:"none",padding:"5px 0",fontWeight:500,transition:"color .2s" }} onMouseEnter={e=>e.currentTarget.style.color=INK} onMouseLeave={e=>e.currentTarget.style.color=MUTED}>{l}</a>
           ))}
         </div>
@@ -76,14 +75,14 @@ export default function DocsPage() {
             <div style={{ fontSize:12,fontWeight:700,color:"#C8841A",letterSpacing:".4px",textTransform:"uppercase",marginBottom:10 }}>API Reference</div>
             <h1 style={{ fontSize:"clamp(26px,4vw,40px)",letterSpacing:"-1.2px",fontWeight:700,marginBottom:12 }}>PayHub API</h1>
             <p style={{ fontSize:16,color:MUTED,lineHeight:1.65,maxWidth:600 }}>
-              REST API for integrating PayHub's dispute and chargeback rail into your agent payment system.
+              A thin metadata layer on top of the <Code>payhub-escrow</Code> Soroban contract — most state lives on-chain and is read directly, this API only stores off-chain context (order IDs, dispute reasons, the signed audit bundle) and drives arbiter resolution.
               Base URL: <Code>http://localhost:3001</Code> (self-hosted).
             </p>
           </div>
 
           <Section title="Authentication" id="auth">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:16 }}>
-              All requests are unauthenticated except <Code>POST /payments/:id/resolve</Code>, which requires an arbiter token in the request body.
+              All requests are unauthenticated except <Code>POST /payments/:id/resolve</Code>, which requires an arbiter token in the request body. On-chain calls (<Code>initiate_payment</Code>, <Code>open_dispute</Code>, etc.) are authenticated separately by the caller's own Freighter signature via Soroban's <Code>require_auth()</Code> — this token only gates the off-chain API, not the contract.
             </p>
             <Block>{`// Arbiter auth — include in resolve requests
 {
@@ -92,88 +91,44 @@ export default function DocsPage() {
           </Section>
 
           <Section title="Endpoints" id="endpoints">
-            <Endpoint method="POST" path="/payments/preflight" desc="A-Pass + CCP compliance check for both parties before any token moves" />
-            <Endpoint method="POST" path="/payments/register" desc="Store enriched payment metadata after on-chain initiatePayment" />
-            <Endpoint method="GET"  path="/payments/:id" desc="Fetch payment details including on-chain status" />
-            <Endpoint method="POST" path="/payments/:id/dispute/preflight" desc="Verify the caller is the original A-Pass-verified payer" />
-            <Endpoint method="POST" path="/payments/:id/dispute/register" desc="Store dispute metadata after on-chain openDispute" />
-            <Endpoint method="POST" path="/payments/:id/resolve" desc="Arbiter resolves — CCP screens the refund leg before execution" />
-            <Endpoint method="POST" path="/payments/:id/auto-resolve" desc="Auto-refund to payer after merchant response window expires" />
+            <Endpoint method="POST" path="/payments/register" desc="Store off-chain metadata after on-chain initiate_payment confirms" />
+            <Endpoint method="GET"  path="/payments/:id" desc="Fetch payment details, merging stored metadata with live on-chain state" />
+            <Endpoint method="POST" path="/payments/:id/dispute/register" desc="Store dispute metadata after on-chain open_dispute confirms" />
+            <Endpoint method="POST" path="/payments/:id/resolve" desc="Arbiter resolves on-chain and generates the signed audit bundle" />
+            <Endpoint method="POST" path="/payments/:id/auto-resolve" desc="Refund to payer after the merchant response window expires" />
             <Endpoint method="GET"  path="/payments/:id/audit" desc="Fetch the signed HMAC audit bundle" />
             <Endpoint method="GET"  path="/health" desc="Service health check" />
           </Section>
 
-          <Section title="POST /payments/preflight" id="preflight">
-            <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:4 }}>
-              Run before calling <Code>initiatePayment</Code> on-chain. Verifies both parties hold a valid A-Pass, checks A-Token transfer eligibility via the CCP protocol, and generates a Travel Rule reference.
-            </p>
-            <Block>{`// Request
-POST /payments/preflight
-{
-  "payerAddress":    "0xABC...",
-  "merchantAddress": "0xDEF...",
-  "amount":          "50000000",   // in token base units (6 decimals)
-  "asset":           "0x...",      // A-Token contract address
-  "orderId":         "order_123"
-}
-
-// Response 200
-{
-  "cleared":       true,
-  "apassPayer":    "434",          // Cleanverse A-Pass ID — store and pass to contract
-  "apassMerchant": "435",
-  "ccpRiskScore":  2,
-  "payerTier":     "20",
-  "merchantTier":  "20",
-  "travelRuleId":  "tr_pre_abc..."
-}
-
-// Response 403 — payment blocked
-{
-  "error": "Payer does not hold a valid A-Pass",
-  "detail": { ... }
-}`}</Block>
-          </Section>
-
           <Section title="POST /payments/register" id="payment">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:4 }}>
-              Call immediately after <Code>initiatePayment</Code> confirms on-chain. Stores enriched metadata so the audit trail can be reconstructed.
+              Call immediately after <Code>initiate_payment</Code> confirms on-chain. Stores metadata so the payment can be looked up and the audit trail reconstructed — the payment id itself is a sequential <Code>u64</Code> returned by the contract, not a hash.
             </p>
             <Block>{`// Request
 POST /payments/register
 {
-  "paymentId":       "0x...",    // bytes32 returned from initiatePayment event
+  "paymentId":       "0",         // u64 returned by initiate_payment
   "orderId":         "order_123",
-  "payerAddress":    "0xABC...",
-  "merchantAddress": "0xDEF...",
-  "amount":          "50000000",
-  "asset":           "0x...",
-  "apassPayer":      "434",
-  "apassMerchant":   "435",
-  "travelRuleId":    "tr_pre_abc...",
-  "txHash":          "0x..."
+  "payerAddress":    "GABC...",
+  "merchantAddress": "GDEF...",
+  "amount":          "500000000", // raw i128 stroops (7 decimals)
+  "asset":           "C...",      // Soroban token/asset contract id
+  "txHash":          "a1b2c3..."
 }
 
 // Response 200
-{ "ok": true, "paymentId": "0x..." }`}</Block>
+{ "ok": true, "paymentId": "0" }`}</Block>
           </Section>
 
           <Section title="Disputes" id="disputes">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:16 }}>
-              Disputes are identity-bound — only the original A-Pass-verified payer can open one. The backend re-verifies identity at dispute time before the on-chain transaction is submitted.
+              Only the original payer can open a dispute — enforced on-chain by <Code>payment.payer.require_auth()</Code> inside <Code>open_dispute</Code>, not by this API. The API just records the reason and hands off to the arbiter at resolution time.
             </p>
-            <Block>{`// Step 1 — verify payer identity (before submitting on-chain)
-POST /payments/:id/dispute/preflight
-{ "callerAddress": "0xABC..." }
-
-// Response 200
-{ "eligible": true, "apassId": "434", "windowClosesAt": "2026-06-21T..." }
-
-// Step 2 — register after on-chain openDispute confirms
+            <Block>{`// Step 1 — payer signs open_dispute on-chain via Freighter, then register it
 POST /payments/:id/dispute/register
-{ "reason": "Merchant did not deliver", "txHash": "0x..." }
+{ "reason": "Merchant did not deliver", "txHash": "a1b2c3..." }
 
-// Step 3 — arbiter resolves (CCP screens refund leg first)
+// Step 2 — arbiter resolves (calls resolve_dispute on-chain)
 POST /payments/:id/resolve
 {
   "inFavorOfPayer": true,
@@ -184,27 +139,23 @@ POST /payments/:id/resolve
 
           <Section title="GET /payments/:id/audit" id="audit">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:4 }}>
-              Returns a signed HMAC audit bundle generated at resolution time. Contains the full compliance trail for regulators.
+              Returns a signed HMAC audit bundle generated at resolution time — a tamper-evident record of what was paid, disputed, and how it was resolved.
             </p>
             <Block>{`// Response 200
 {
   "payment": {
-    "id":     "0x...",
+    "id":     "0",
     "status": "REFUNDED"
   },
-  "identity": {
-    "payerAPass":    "434",
-    "merchantAPass": "435"
-  },
-  "compliance": {
-    "ccpPayment": { "cleared": true, "riskScore": 2 },
-    "ccpRefund":  { "cleared": true },
-    "travelRule": ["tr_pre_abc..."]
+  "dispute": {
+    "reason":            "Merchant did not deliver",
+    "openedAt":          "2026-06-18T08:00:00Z",
+    "merchantResponded": false
   },
   "resolution": {
     "verdict":    "Merchant did not provide delivery proof. Refund issued.",
     "resolvedAt": "2026-06-18T10:00:00Z",
-    "txHash":     "0x..."
+    "txHash":     "a1b2c3..."
   },
   "signature": "sha256=..."    // HMAC-signed — tamper-evident
 }`}</Block>
@@ -212,45 +163,45 @@ POST /payments/:id/resolve
 
           <Section title="Smart Contract" id="contract">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:12 }}>
-              Deployed at <Code>0x7BBDa4409e300eaDB0A61F137498480c96173C9e</Code> on Monad Testnet (Chain ID 10143).
+              <Code>payhub-escrow</Code>, a from-scratch Soroban port of the original Solidity contract. Not yet deployed to testnet — see{" "}
+              <a href="https://github.com/Payhub-protocol/payhub/tree/main/contracts-soroban" style={{ color:"#C8841A" }}>contracts-soroban/README.md</a> for current status.
             </p>
-            <Block>{`// Key functions
+            <Block>{`// Key functions — contracts-soroban/payhub-escrow/src/lib.rs
 
-// Payer calls after backend preflight
-initiatePayment(
-  address merchant,
-  address token,
-  uint256 amount,
-  string  orderId,
-  string  apassPayer,      // A-Pass ID stored on-chain for audit
-  string  apassMerchant,
-  uint256 customFinality   // 0 = use 3-day default
-) returns (bytes32 paymentId)
+// Payer initiates; funds move payer -> contract escrow in this call
+initiate_payment(
+  env: Env, payer: Address, merchant: Address, token: Address,
+  amount: i128, order_id: String, custom_finality: u64  // 0 = 3-day default
+) -> Result<u64, Error>   // returns the payment id
 
-// Payer opens dispute during dispute window (2 days)
-openDispute(bytes32 paymentId, string reason)
+// Merchant claims once the finality window has elapsed
+claim_payment(env: Env, id: u64) -> Result<(), Error>
 
-// Merchant submits evidence (24h response window)
-respondToDispute(bytes32 paymentId, string evidence)
+// Payer opens a dispute before the dispute window closes (2 days default)
+open_dispute(env: Env, id: u64, reason: String) -> Result<(), Error>
 
-// Arbiter (or owner) resolves
-// inFavorOfPayer=true → refund to original payer
-resolveDispute(bytes32 paymentId, bool inFavorOfPayer, string verdict)
+// Merchant submits evidence within the response window (24h default)
+respond_to_dispute(env: Env, id: u64, evidence: String) -> Result<(), Error>
 
-// Anyone can call after merchant misses response window
-autoResolveExpiredDispute(bytes32 paymentId)`}</Block>
+// Arbiter resolves — no verdict string on-chain, that lives in the audit bundle
+resolve_dispute(
+  env: Env, caller: Address, id: u64, in_favor_of_payer: bool
+) -> Result<(), Error>
+
+// Anyone can call once the merchant misses the response window
+auto_resolve_expired_dispute(env: Env, id: u64) -> Result<(), Error>`}</Block>
           </Section>
 
-          <Section title="Cleanverse Compliance Primitives" id="compliance">
+          <Section title="Design notes" id="design">
             <p style={{ fontSize:15,color:MUTED,lineHeight:1.7,marginBottom:16 }}>
-              PayHub enforces compliance at every gate using the Cleanverse Cooperate API. No on-chain transaction is submitted without a backend pre-check.
+              Where this contract differs from the original Solidity version, and why.
             </p>
             <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10 }}>
               {[
-                ["A-Pass","Identity","Both payer and merchant verified before payment. Re-verified at dispute time."],
-                ["A-Token","Token policy","Transfer eligibility checked for both parties on every payment leg."],
-                ["CCP","Sanctions + AML","Screens payment AND refund legs against global AML and sanctions databases."],
-                ["Travel Rule","Regulatory","Originator/beneficiary metadata attached to every transfer automatically."],
+                ["No msg.sender","Auth","Soroban has no implicit caller identity. Every privileged action takes an explicit Address and calls .require_auth() on it."],
+                ["u64 ids","Payment IDs","Sequential integers returned by the contract, not a keccak256 hash — matches the pattern used by tributary's splitter contract."],
+                ["Typed errors","#[contracterror]","Numeric error codes instead of require(..., \"string\") reverts, documented on each variant."],
+                ["No compliance gate","Scope","A-Pass identity verification and CCP/Travel-Rule screening from the Monad version have no Stellar equivalent and were dropped, not stubbed."],
               ].map(([name,tag,desc])=>(
                 <div key={name} style={{ background:CREAM,border:`1px solid ${BORDER}`,borderRadius:12,padding:"16px 16px 18px" }}>
                   <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8 }}>
@@ -265,7 +216,7 @@ autoResolveExpiredDispute(bytes32 paymentId)`}</Block>
 
           <div style={{ padding:"24px",background:CREAM,border:`1px solid ${BORDER}`,borderRadius:14 }}>
             <div style={{ fontSize:14,fontWeight:700,marginBottom:6 }}>Try it live</div>
-            <p style={{ fontSize:14,color:MUTED,marginBottom:14,lineHeight:1.6 }}>Walk through the full integration flow — compliance checks, escrow, dispute, and audit download.</p>
+            <p style={{ fontSize:14,color:MUTED,marginBottom:14,lineHeight:1.6 }}>Walk through the full integration flow — escrow, dispute, resolution, and audit download.</p>
             <Link href="/demo" style={{ display:"inline-flex",padding:"10px 20px",borderRadius:9,background:AMBER,color:INK,fontWeight:700,fontSize:14,textDecoration:"none" }}>Open demo →</Link>
           </div>
         </div>

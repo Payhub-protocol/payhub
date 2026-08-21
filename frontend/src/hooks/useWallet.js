@@ -7,11 +7,11 @@ export function useWallet() {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
 
-  // Connects via window.ethereum (MetaMask / Coinbase / any injected wallet)
-  const connect = useCallback(async (rawProvider) => {
+  // Connects via the Freighter browser extension
+  const connect = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const w = await connectWallet(rawProvider);
+      const w = await connectWallet();
       setWallet(w);
       return w;
     } catch (e) {

@@ -1,7 +1,6 @@
 export const runtime = "nodejs";
 import store from "@/lib/server/store";
 import { getPayment, getDispute, arbiterResolve } from "@/lib/server/chain";
-import { ccpPreCheck, downloadTravelRule } from "@/lib/server/cleanverse";
 import { buildAuditBundle } from "@/lib/server/audit";
 
 export async function POST(request, { params }) {
@@ -14,46 +13,26 @@ export async function POST(request, { params }) {
     const onChain = await getPayment(id).catch(() => null);
     if (!onChain) return Response.json({ error: "Payment not found" }, { status: 404 });
 
-    let ccpRefund = null;
-    if (inFavorOfPayer) {
-      ccpRefund = await ccpPreCheck({
-        fromAddress:   onChain.merchant,
-        toAddress:     onChain.payer,
-        atokenAddress: onChain.token,
-      });
-      if (!ccpRefund.cleared)
-        return Response.json({ error: "Refund blocked by CCP check", flags: ccpRefund.flags }, { status: 403 });
-    }
-
-    const result  = await arbiterResolve(id, inFavorOfPayer, verdict);
+    const result  = await arbiterResolve(id, inFavorOfPayer);
     const meta    = store.payments[id] || {};
     const dispute = await getDispute(id).catch(() => null);
 
-    let trReport = null;
-    if (meta.txHash) {
-      trReport = await downloadTravelRule({ txHash: meta.txHash, walletAddress: onChain.payer });
-    }
-
     const disputeData = dispute || store.disputes[id] || null;
     const audit = buildAuditBundle({
-      paymentId:     id,
-      orderId:       meta.orderId      || onChain.orderId,
-      payer:         onChain.payer,
-      merchant:      onChain.merchant,
-      apassPayer:    onChain.apassPayer,
-      apassMerchant: onChain.apassMerchant,
-      amount:        onChain.amount?.toString()    ?? onChain.amount,
-      token:         onChain.token,
-      status:        inFavorOfPayer ? "REFUNDED" : "SETTLED",
-      createdAt:     onChain.createdAt?.toString() ?? onChain.createdAt,
-      dispute:       disputeData ? {
+      paymentId:  id,
+      orderId:    meta.orderId  || onChain.order_id,
+      payer:      onChain.payer,
+      merchant:   onChain.merchant,
+      amount:     onChain.amount?.toString() ?? onChain.amount,
+      token:      onChain.token,
+      status:     inFavorOfPayer ? "REFUNDED" : "SETTLED",
+      createdAt:  onChain.created_at?.toString() ?? onChain.createdAt,
+      dispute:    disputeData ? {
         ...disputeData,
-        openedAt:         disputeData.openedAt?.toString()         ?? disputeData.openedAt,
-        responseDeadline: disputeData.responseDeadline?.toString() ?? disputeData.responseDeadline,
+        openedAt:         disputeData.opened_at?.toString()         ?? disputeData.openedAt,
+        responseDeadline: disputeData.response_deadline?.toString() ?? disputeData.responseDeadline,
       } : null,
-      ccpResults:    { refund: ccpRefund },
-      travelRule:    { id: meta.travelRuleId, reportUrl: trReport?.downloadUrl },
-      resolution:    { verdict, inFavorOfPayer, txHash: result.txHash, resolvedAt: new Date().toISOString() },
+      resolution: { verdict, inFavorOfPayer, txHash: result.txHash, resolvedAt: new Date().toISOString() },
     });
     store.audits[id] = audit;
 

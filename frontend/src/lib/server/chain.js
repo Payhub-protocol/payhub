@@ -1,50 +1,111 @@
-import { ethers } from "ethers";
+import {
+  Contract,
+  TransactionBuilder,
+  Networks,
+  BASE_FEE,
+  rpc,
+  nativeToScVal,
+  scValToNative,
+  Keypair,
+  Address,
+} from "@stellar/stellar-sdk";
 
-const RPC = process.env.MONAD_RPC_URL || "https://testnet-rpc.monad.xyz";
-const PK  = process.env.ARBITER_PRIVATE_KEY;
+const NETWORK_PASSPHRASE = Networks.TESTNET;
+const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
+const CONTRACT_ID = process.env.PAYHUB_CONTRACT_ID || "";
+const ARBITER_SECRET = process.env.ARBITER_SECRET_KEY;
 
-let _provider, _signer;
-
-const ABI = [
-  "function resolveDispute(bytes32 paymentId, bool inFavorOfPayer, string calldata verdict) external",
-  "function autoResolveExpiredDispute(bytes32 paymentId) external",
-  "function getPayment(bytes32 paymentId) external view returns (tuple(bytes32 id, address payer, address merchant, address token, uint256 amount, uint256 createdAt, uint256 finalityWindow, uint256 disputeWindow, uint8 status, string orderId, string apassPayer, string apassMerchant))",
-  "function getDispute(bytes32 paymentId) external view returns (tuple(bytes32 paymentId, string reason, uint256 openedAt, uint256 responseDeadline, bool merchantResponded, string merchantEvidence, address resolvedFor))",
-];
-
-function getProvider() {
-  if (!_provider) _provider = new ethers.JsonRpcProvider(RPC);
-  return _provider;
+function requireContractId() {
+  if (!CONTRACT_ID) throw new Error("PAYHUB_CONTRACT_ID not set");
+  return CONTRACT_ID;
 }
 
-function getSigner() {
-  if (!PK) throw new Error("ARBITER_PRIVATE_KEY not set");
-  if (!_signer) _signer = new ethers.Wallet(PK, getProvider());
-  return _signer;
+function server() {
+  return new rpc.Server(RPC_URL);
 }
 
-function getContract(signerOrProvider) {
-  const addr = process.env.PAYHUB_CONTRACT_ADDRESS;
-  if (!addr) throw new Error("PAYHUB_CONTRACT_ADDRESS not set");
-  return new ethers.Contract(addr, ABI, signerOrProvider || getProvider());
+function arbiterKeypair() {
+  if (!ARBITER_SECRET) throw new Error("ARBITER_SECRET_KEY not set");
+  return Keypair.fromSecret(ARBITER_SECRET);
 }
 
-export async function getPayment(paymentId) {
-  return getContract().getPayment(paymentId);
+async function invokeAsArbiter(method, args) {
+  const rpcServer = server();
+  const kp = arbiterKeypair();
+  const contract = new Contract(requireContractId());
+  const account = await rpcServer.getAccount(kp.publicKey());
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(60)
+    .build();
+
+  const simulated = await rpcServer.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(simulated)) {
+    throw new Error(`Simulation failed for ${method}: ${simulated.error}`);
+  }
+
+  const prepared = rpc.assembleTransaction(tx, simulated).build();
+  prepared.sign(kp);
+
+  const sendResult = await rpcServer.sendTransaction(prepared);
+  if (sendResult.status === "ERROR") {
+    throw new Error(`Submission failed for ${method}: ${JSON.stringify(sendResult.errorResult)}`);
+  }
+
+  let result = await rpcServer.getTransaction(sendResult.hash);
+  const start = Date.now();
+  while (result.status === "NOT_FOUND" && Date.now() - start < 30_000) {
+    await new Promise((r) => setTimeout(r, 1500));
+    result = await rpcServer.getTransaction(sendResult.hash);
+  }
+  if (result.status !== "SUCCESS") {
+    throw new Error(`Transaction ${sendResult.hash} ${result.status}`);
+  }
+  return { txHash: sendResult.hash };
 }
 
-export async function getDispute(paymentId) {
-  return getContract().getDispute(paymentId);
+async function readContract(method, args) {
+  const rpcServer = server();
+  const kp = arbiterKeypair();
+  const contract = new Contract(requireContractId());
+  const account = await rpcServer.getAccount(kp.publicKey());
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(30)
+    .build();
+
+  const simulated = await rpcServer.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(simulated)) {
+    throw new Error(`Simulation failed for ${method}: ${simulated.error}`);
+  }
+  if (!simulated.result?.retval) return null;
+  return scValToNative(simulated.result.retval);
 }
 
-export async function arbiterResolve(paymentId, inFavorOfPayer, verdict) {
-  const tx  = await getContract(getSigner()).resolveDispute(paymentId, inFavorOfPayer, verdict);
-  const rec = await tx.wait();
-  return { txHash: rec.hash };
+export async function getPayment(id) {
+  return readContract("get_payment", [nativeToScVal(id, { type: "u64" })]);
 }
 
-export async function autoResolveExpired(paymentId) {
-  const tx  = await getContract(getSigner()).autoResolveExpiredDispute(paymentId);
-  const rec = await tx.wait();
-  return { txHash: rec.hash };
+export async function getDispute(id) {
+  return readContract("get_dispute", [nativeToScVal(id, { type: "u64" })]);
+}
+
+export async function arbiterResolve(id, inFavorOfPayer) {
+  const kp = arbiterKeypair();
+  return invokeAsArbiter("resolve_dispute", [
+    new Address(kp.publicKey()).toScVal(),
+    nativeToScVal(id, { type: "u64" }),
+    nativeToScVal(inFavorOfPayer, { type: "bool" }),
+  ]);
+}
+
+export async function autoResolveExpired(id) {
+  return invokeAsArbiter("auto_resolve_expired_dispute", [nativeToScVal(id, { type: "u64" })]);
 }

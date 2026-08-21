@@ -2,7 +2,11 @@ export const runtime = "nodejs";
 import store from "@/lib/server/store";
 import { getPayment } from "@/lib/server/chain";
 
-const STATUS_MAP = ["PENDING", "SETTLED", "DISPUTED", "REFUNDED"];
+// The contract's Status enum comes back from scValToNative as its variant
+// name ("Pending", "Settled", ...), not a numeric index.
+function statusOf(onChain) {
+  return String(onChain.status ?? "UNKNOWN").toUpperCase();
+}
 
 export async function GET(_req, { params }) {
   try {
@@ -19,10 +23,8 @@ export async function GET(_req, { params }) {
         payer:    onChain.payer,
         merchant: onChain.merchant,
         amount:   onChain.amount?.toString(),
-        status:   STATUS_MAP[onChain.status] || String(onChain.status),
-        createdAt: onChain.createdAt?.toString(),
-        apassPayer:    onChain.apassPayer,
-        apassMerchant: onChain.apassMerchant,
+        status:   statusOf(onChain),
+        createdAt: onChain.created_at?.toString() ?? onChain.createdAt?.toString(),
       } : null,
     });
   } catch (e) {

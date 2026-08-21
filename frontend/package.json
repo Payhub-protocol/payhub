@@ -8,7 +8,8 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
-    "ethers": "^6.13.0",
+    "@stellar/freighter-api": "^6.0.1",
+    "@stellar/stellar-sdk": "^13.1.0",
     "lucide-react": "^0.511.0",
     "next": "^15.3.9",
     "react": "^19.0.0",

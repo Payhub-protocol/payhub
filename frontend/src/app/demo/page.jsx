@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
-import { ethers } from "ethers";
-import { connectWallet, connectWalletConnect, initiatePayment, openDisputeOnChain } from "../../lib/wallet";
+import { connectWallet, initiatePayment, openDisputeOnChain } from "../../lib/wallet";
 import { api } from "../../lib/api";
 import Link from "next/link";
 
@@ -14,10 +13,14 @@ const CREAM  = "#FAF9F6";
 const GREEN  = { text:"#1B7A4B", bg:"#E9F7EF", border:"#BBE5CF" };
 const RED    = { text:"#B91C1C", bg:"#FEF2F2", border:"#FECACA" };
 
-const DEMO_ORDER_ID  = `demo_${Date.now()}`;
-const DEMO_AMOUNT    = ethers.parseUnits("50", 6);
-const TOKEN_ADDR = "0x4fE3D834032E022049a1c904016C02f95A4f94A9";
-const PAYHUB     = "0x7BBDa4409e300eaDB0A61F137498480c96173C9e";
+const DEMO_ORDER_ID = `demo_${Date.now()}`;
+// Soroban asset amounts are raw i128 stroops (7 decimals for most Stellar assets).
+const DEMO_AMOUNT_DISPLAY = "50";
+const DEMO_AMOUNT = 50n * 10_000_000n;
+// Placeholders until payhub-escrow and a test asset are deployed to testnet
+// (see contracts-soroban/README.md "Status").
+const TOKEN_ADDR = process.env.NEXT_PUBLIC_DEMO_TOKEN_CONTRACT || "C... (test asset not deployed yet)";
+const PAYHUB     = process.env.NEXT_PUBLIC_PAYHUB_CONTRACT || "C... (payhub-escrow not deployed yet)";
 
 // ─── Shared atoms ─────────────────────────────────────────────────────────────
 function Btn({ onClick, disabled, loading, children, variant = "primary" }) {
@@ -75,35 +78,15 @@ function StepHeader({ n, title, subtitle, active, done }) {
   );
 }
 
-function ComplianceRow({ label, status, detail }) {
-  const colors = { done:GREEN, error:RED, pending:{ text:MUTED, bg:CREAM, border:BORDER }, wait:{ text:"#B0B8C1", bg:"#fff", border:BORDER } };
-  const c = colors[status] || colors.wait;
-  return (
-    <div style={{ display:"flex",alignItems:"center",gap:12,padding:"10px 14px",border:`1px solid ${c.border}`,borderRadius:10,background:c.bg,marginBottom:8 }}>
-      {status==="done"    && <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill={GREEN.bg} stroke={GREEN.border}/><path d="M5 8l2 2 4-4" stroke={GREEN.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-      {status==="error"   && <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill={RED.bg} stroke={RED.border}/><path d="M5.5 5.5l5 5m0-5l-5 5" stroke={RED.text} strokeWidth="1.5" strokeLinecap="round"/></svg>}
-      {status==="pending" && <Spinner size={16} color={MUTED} />}
-      {status==="wait"    && <div style={{ width:16,height:16,borderRadius:"50%",border:`2px solid ${BORDER}` }} />}
-      <div style={{ flex:1 }}>
-        <div style={{ fontSize:14,fontWeight:500,color:c.text }}>{label}</div>
-        {detail && <div style={{ fontSize:12,color:MUTED,marginTop:1 }}>{detail}</div>}
-      </div>
-    </div>
-  );
-}
-
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function DemoPage() {
   const [wallet,       setWallet]       = useState(null);
   const [connecting,   setConnecting]   = useState(false);
-  const [walletOpen,   setWalletOpen]   = useState(false);
   const [step,         setStep]         = useState(0);
   const [busy,         setBusy]         = useState(false);
   const [payStatus,    setPayStatus]    = useState(null);
   const [error,        setError]        = useState(null);
   const [merchantAddr, setMerchantAddr] = useState("");
-  const [checks,       setChecks]       = useState([]);
-  const [preflight,    setPreflight]    = useState(null);
   const [paymentId,    setPaymentId]    = useState(null);
   const [payTx,        setPayTx]        = useState(null);
   const [disputeTx,    setDisputeTx]    = useState(null);
@@ -114,151 +97,72 @@ export default function DemoPage() {
 
   const err = (msg) => { setError(msg); setBusy(false); };
 
-  async function connectWalletClick(id) {
+  async function connectClick() {
     setConnecting(true); setError(null);
     try {
-      let raw = window.ethereum;
-      if (id === "okx"      && window.okxwallet)               raw = window.okxwallet;
-      if (id === "coinbase" && window.coinbaseWalletExtension) raw = window.coinbaseWalletExtension;
-      if (!raw) throw new Error("Wallet extension not found or not installed.");
-      const w = await connectWallet(raw);
+      const w = await connectWallet();
       setWallet(w);
-      setWalletOpen(false);
     } catch (e) {
-      setError(e.code === 4001 ? "Connection cancelled." : e.message);
+      setError(e.message);
     } finally {
       setConnecting(false);
     }
   }
 
-  async function runPreflight() {
-    if (!wallet || !merchantAddr) return;
-    if (merchantAddr.toLowerCase() === wallet.address.toLowerCase())
-      return setError("Merchant address cannot be the same as your connected wallet. Use a different address.");
-    setBusy(true); setError(null);
-    const steps = [
-      { label:"A-Pass verification — payer identity",    status:"pending" },
-      { label:"A-Pass verification — merchant identity", status:"wait"    },
-      { label:"CCP sanctions + AML screening",           status:"wait"    },
-      { label:"Travel Rule metadata generated",          status:"wait"    },
-    ];
-    setChecks([...steps]);
-    const tick = (i, status, detail) => { steps[i] = { ...steps[i], status, detail }; setChecks([...steps]); };
-    try {
-      const result = await api.preflight({
-        payerAddress:    wallet.address,
-        merchantAddress: merchantAddr,
-        amount:          DEMO_AMOUNT.toString(),
-        asset:           TOKEN_ADDR,
-        orderId:         DEMO_ORDER_ID,
-      });
-      tick(0, "done", `A-Pass ID: ${result.apassPayer}`);
-      tick(1, "done", `A-Pass ID: ${result.apassMerchant}`);
-      tick(2, "done", `Risk score: ${result.ccpRiskScore ?? 2} — cleared`);
-      tick(3, "done", `Travel Rule ref: ${result.travelRuleId}`);
-      setPreflight(result); setStep(2);
-    } catch (e) {
-      const fi = steps.findIndex(s => s.status === "pending");
-      if (fi >= 0) tick(fi, "error", e.message);
-      err(e.message);
-    } finally { setBusy(false); }
-  }
-
   async function pay() {
-    if (!wallet) return;
+    if (!wallet || !merchantAddr) return;
+    if (merchantAddr === wallet.address)
+      return setError("Merchant address cannot be the same as your connected wallet. Use a different address.");
     setBusy(true); setError(null); setPayStatus(null);
-    const ERC20_ABI = [
-      "function allowance(address,address) view returns (uint256)",
-      "function approve(address,uint256) returns (bool)",
-      "function balanceOf(address) view returns (uint256)",
-    ];
     try {
-      setPayStatus("Checking token balance and allowance…");
-      const token = new ethers.Contract(TOKEN_ADDR, ERC20_ABI, wallet.signer);
-      const [bal, allowance] = await Promise.all([
-        token.balanceOf(wallet.address),
-        token.allowance(wallet.address, PAYHUB),
-      ]);
-      if (bal < DEMO_AMOUNT)
-        throw new Error(`Insufficient balance: you have ${ethers.formatUnits(bal, 6)} A-Token, need 50.`);
-      if (allowance < DEMO_AMOUNT) {
-        setPayStatus("Step 1/2 — Approve token spend. Confirm in your wallet…");
-        const approveTx = await token.approve(PAYHUB, DEMO_AMOUNT);
-        setPayStatus("Waiting for approval to confirm on chain…");
-        await approveTx.wait();
-      }
-      setPayStatus("Step 2/2 — Sending payment. Confirm in your wallet…");
-      const PAYHUB_ABI = [
-        "function initiatePayment(address merchant, address token, uint256 amount, string orderId, string apassPayer, string apassMerchant, uint256 customFinality) external returns (bytes32)",
-        "event PaymentInitiated(bytes32 indexed paymentId, address indexed payer, address indexed merchant, address token, uint256 amount, string orderId, uint256 finalityDeadline)",
-      ];
-      const payhubContract = new ethers.Contract(PAYHUB, PAYHUB_ABI, wallet.signer);
-      const tx  = await payhubContract.initiatePayment(
-        merchantAddr, TOKEN_ADDR, DEMO_AMOUNT, DEMO_ORDER_ID,
-        preflight.apassPayer, preflight.apassMerchant, 0
-      );
-      setPayStatus("Waiting for payment tx to confirm…");
-      const rec = await tx.wait();
-      // Parse PaymentInitiated event — scan all logs, not just index 0
-      const iface = payhubContract.interface;
-      const INITIATED_TOPIC = ethers.id("PaymentInitiated(bytes32,address,address,address,uint256,string,uint256)");
-      const parsedLog = rec.logs
-        .map(l => { try { return iface.parseLog(l); } catch { return null; } })
-        .find(e => e?.name === "PaymentInitiated");
-      const initiatedLog = rec.logs.find(l => l.topics?.[0] === INITIATED_TOPIC);
-      const pid = parsedLog?.args?.paymentId ?? initiatedLog?.topics?.[1];
-      if (!pid) throw new Error("Could not extract paymentId from receipt (tx: " + rec.hash + ")");
-      setPayStatus("Registering with compliance backend…");
+      setPayStatus("Sending payment — confirm in Freighter…");
+      const { txHash, paymentId: pid } = await initiatePayment(wallet.address, {
+        merchant: merchantAddr,
+        token: TOKEN_ADDR,
+        amount: DEMO_AMOUNT,
+        orderId: DEMO_ORDER_ID,
+      });
+      setPayStatus("Registering payment…");
       await api.registerPayment({
-        paymentId: pid, orderId: DEMO_ORDER_ID,
+        paymentId: String(pid), orderId: DEMO_ORDER_ID,
         payerAddress: wallet.address, merchantAddress: merchantAddr,
         amount: DEMO_AMOUNT.toString(), asset: TOKEN_ADDR,
-        apassPayer: preflight.apassPayer, apassMerchant: preflight.apassMerchant,
-        travelRuleId: preflight.travelRuleId, txHash: rec.hash,
+        txHash,
       });
-      setPaymentId(pid); setPayTx(rec.hash); setStep(3);
+      setPaymentId(pid); setPayTx(txHash); setStep(2);
     } catch (e) {
-      err(e.reason || e.shortMessage || e.message || "Payment failed.");
+      err(e.message || "Payment failed.");
     } finally { setBusy(false); setPayStatus(null); }
   }
 
   async function openDispute() {
-    if (!wallet || !paymentId) return;
+    if (!wallet || paymentId == null) return;
     setBusy(true); setError(null); setPayStatus(null);
-    const DISPUTE_ABI = [
-      "function openDispute(bytes32 paymentId, string reason) external",
-      "event DisputeOpened(bytes32 indexed paymentId, address indexed payer, string reason, uint256 responseDeadline)",
-    ];
     try {
-      setPayStatus("Verifying payer identity…");
-      await api.disputePreflight(paymentId, wallet.address);
-      setPayStatus("Opening dispute — confirm in your wallet…");
-      const disputeContract = new ethers.Contract(PAYHUB, DISPUTE_ABI, wallet.signer);
-      const tx  = await disputeContract.openDispute(paymentId, disputeReason);
-      setPayStatus("Waiting for dispute tx to confirm…");
-      const rec = await tx.wait();
+      setPayStatus("Opening dispute — confirm in Freighter…");
+      const { txHash } = await openDisputeOnChain(wallet.address, paymentId, disputeReason);
       setPayStatus("Registering dispute…");
-      await api.registerDispute(paymentId, { reason: disputeReason, txHash: rec.hash });
-      setDisputeTx(rec.hash); setStep(4);
+      await api.registerDispute(String(paymentId), { reason: disputeReason, txHash });
+      setDisputeTx(txHash); setStep(3);
     } catch (e) {
-      err(e.reason || e.shortMessage || e.message || "Dispute failed.");
+      err(e.message || "Dispute failed.");
     } finally { setBusy(false); setPayStatus(null); }
   }
 
   async function resolve() {
-    if (!paymentId) return;
+    if (paymentId == null) return;
     setBusy(true); setError(null);
     try {
-      const result = await api.resolve(paymentId, {
+      const result = await api.resolve(String(paymentId), {
         inFavorOfPayer: true,
-        verdict:        "Merchant did not provide delivery proof. Refund issued to original verified payer wallet.",
+        verdict:        "Merchant did not respond within the response window. Refund issued to original payer.",
         authToken:      process.env.NEXT_PUBLIC_ARBITER_TOKEN || "demo_arbiter_token",
       });
-      setAudit(result.audit); setStep(5);
+      setAudit(result.audit); setStep(4);
     } catch (e) { err(e.message); } finally { setBusy(false); }
   }
 
-  const shortAddr = (a) => a ? `${a.slice(0,8)}...${a.slice(-4)}` : "";
+  const shortAddr = (a) => a ? `${a.slice(0,6)}...${a.slice(-6)}` : "";
 
   return (
     <>
@@ -283,10 +187,10 @@ export default function DemoPage() {
                     <span style={{ width:6,height:6,borderRadius:"50%",background:"#22A05E",display:"inline-block" }} />
                     {shortAddr(wallet.address)}
                   </span>
-                : <button onClick={() => setWalletOpen(true)} disabled={connecting}
+                : <button onClick={connectClick} disabled={connecting}
                     style={{ display:"flex",alignItems:"center",gap:7,padding:"7px 16px",borderRadius:8,background:AMBER,border:"none",color:INK,fontWeight:600,fontSize:13,cursor:"pointer",fontFamily:"inherit" }}>
                     {connecting ? <Spinner size={13} /> : null}
-                    {connecting ? "Connecting..." : "Connect Wallet"}
+                    {connecting ? "Connecting..." : "Connect Freighter"}
                   </button>
               }
             </div>
@@ -298,17 +202,17 @@ export default function DemoPage() {
           {/* Header */}
           <div style={{ textAlign:"center",marginBottom:48 }}>
             <div style={{ display:"inline-flex",alignItems:"center",gap:7,fontSize:12,fontWeight:700,color:"#C8841A",background:"#FCF4E4",border:"1px solid #F4E3C0",padding:"6px 14px",borderRadius:100,marginBottom:16,letterSpacing:".3px",textTransform:"uppercase" }}>
-              Protocol Demo
+              Protocol Demo — Stellar Testnet
             </div>
             <h1 style={{ fontSize:"clamp(28px,4vw,42px)",letterSpacing:"-1.5px",fontWeight:700,marginBottom:12 }}>An agent payment — and its chargeback</h1>
             <p style={{ fontSize:16.5,color:MUTED,lineHeight:1.65,maxWidth:520,margin:"0 auto" }}>
-              This is what a PayHub integration looks like end-to-end: A-Pass identity checks, CCP screening, on-chain escrow, dispute, and a refund that goes back to the original verified payer — no human needed.
+              This is what a PayHub integration looks like end-to-end: on-chain escrow, a dispute window, and a refund that returns to the original payer — no human needed.
             </p>
           </div>
 
           {/* Progress bar */}
           <div style={{ display:"flex",gap:4,marginBottom:40 }}>
-            {["Connect","Compliance","Pay","Dispute","Resolve","Audit"].map((label, i) => (
+            {["Connect","Pay","Dispute","Resolve","Audit"].map((label, i) => (
               <div key={i} style={{ flex:1,textAlign:"center" }}>
                 <div style={{ height:3,borderRadius:2,background:i<=step?AMBER:"#F0EFEA",transition:"background .4s",marginBottom:6 }} />
                 <div style={{ fontSize:10,fontWeight:600,color:i<=step?"#C8841A":"#B0B8C1",textTransform:"uppercase",letterSpacing:".3px",display:"none" }} className="ph-sl">{label}</div>
@@ -327,14 +231,14 @@ export default function DemoPage() {
 
             {/* Step 0: Connect */}
             <Card accent={step===0}>
-              <StepHeader n="1" title="Connect Wallet" subtitle="Any Ethereum wallet extension (MetaMask, Coinbase Wallet, Brave, Rainbow…) on Monad Testnet" active={step===0} done={step>0} />
+              <StepHeader n="1" title="Connect Wallet" subtitle="Freighter, on Stellar Testnet" active={step===0} done={step>0} />
               {step === 0 && (
                 wallet
                   ? <div style={{ display:"flex",alignItems:"center",gap:8,fontSize:14,color:GREEN.text,fontWeight:500 }}>
                       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill={GREEN.bg} stroke={GREEN.border}/><path d="M5 8l2 2 4-4" stroke={GREEN.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
                       Connected: {shortAddr(wallet.address)}
                     </div>
-                  : <div style={{ flex:1 }}><Btn onClick={() => setWalletOpen(true)} loading={connecting}>Connect Wallet</Btn></div>
+                  : <div style={{ flex:1 }}><Btn onClick={connectClick} loading={connecting}>Connect Freighter</Btn></div>
               )}
               {step > 0 && (
                 <div style={{ display:"flex",alignItems:"center",gap:8,fontSize:14,color:GREEN.text,fontWeight:500 }}>
@@ -344,51 +248,28 @@ export default function DemoPage() {
               )}
             </Card>
 
-            {/* Step 1: Compliance */}
+            {/* Step 1: Pay */}
             {step >= 1 && (
               <Card accent={step===1}>
-                <StepHeader n="2" title="Compliance Preflight" subtitle="A-Pass, CCP, and Travel Rule checked before any token moves" active={step===1} done={step>1} />
+                <StepHeader n="2" title="Initiate Payment" subtitle={`${DEMO_AMOUNT_DISPLAY} test asset held in payhub-escrow during the finality window`} active={step===1} done={step>1} />
                 {step === 1 && (
                   <>
                     <div style={{ marginBottom:16 }}>
-                      <label style={{ display:"block",fontSize:13,fontWeight:600,color:INK,marginBottom:6 }}>Merchant wallet address</label>
-                      <input value={merchantAddr} onChange={e => setMerchantAddr(e.target.value)} placeholder="0x..."
+                      <label style={{ display:"block",fontSize:13,fontWeight:600,color:INK,marginBottom:6 }}>Merchant address (G...)</label>
+                      <input value={merchantAddr} onChange={e => setMerchantAddr(e.target.value)} placeholder="G..."
                         style={{ width:"100%",padding:"11px 14px",border:`1px solid ${BORDER}`,borderRadius:10,fontSize:14,fontFamily:"'Space Grotesk',monospace",color:INK,background:"#fff",outline:"none",boxSizing:"border-box" }}
                         onFocus={e => e.currentTarget.style.borderColor=AMBER}
                         onBlur={e => e.currentTarget.style.borderColor=BORDER} />
                     </div>
-                    <Btn onClick={runPreflight} loading={busy} disabled={!merchantAddr || busy}>Run compliance checks</Btn>
-                  </>
-                )}
-                {checks.length > 0 && (
-                  <div style={{ marginTop:16 }}>
-                    {checks.map(s => <ComplianceRow key={s.label} {...s} />)}
-                  </div>
-                )}
-                {preflight && (
-                  <div style={{ display:"flex",alignItems:"center",gap:8,padding:"12px 14px",background:GREEN.bg,border:`1px solid ${GREEN.border}`,borderRadius:10,marginTop:12,fontSize:14,fontWeight:600,color:GREEN.text }}>
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" fill={GREEN.bg} stroke={GREEN.border}/><path d="M5 8l2 2 4-4" stroke={GREEN.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    All compliance checks passed. Safe to proceed.
-                  </div>
-                )}
-              </Card>
-            )}
-
-            {/* Step 2: Pay */}
-            {step >= 2 && (
-              <Card accent={step===2}>
-                <StepHeader n="3" title="Initiate Payment" subtitle="50 A-Token held in PayHub escrow during the finality window" active={step===2} done={step>2} />
-                {step === 2 && (
-                  <>
                     <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:18 }}>
-                      {[["Order",DEMO_ORDER_ID.slice(0,22)+"..."],["Amount","50 A-Token"],["Token",TOKEN_ADDR.slice(0,10)+"..."],["Contract",(process.env.NEXT_PUBLIC_PAYHUB_CONTRACT||"NOT SET").slice(0,10)+"..."]].map(([k,v]) => (
+                      {[["Order",DEMO_ORDER_ID.slice(0,22)+"..."],["Amount",`${DEMO_AMOUNT_DISPLAY} test asset`],["Token",TOKEN_ADDR.slice(0,10)+"..."],["Contract",PAYHUB.slice(0,10)+"..."]].map(([k,v]) => (
                         <div key={k} style={{ background:CREAM,borderRadius:10,padding:"10px 14px" }}>
                           <div style={{ fontSize:12,color:MUTED,fontWeight:500,marginBottom:3 }}>{k}</div>
-                          <div style={{ fontSize:13.5,fontWeight:600,color:v.includes("NOT SET")?RED.text:INK,wordBreak:"break-all" }}>{v}</div>
+                          <div style={{ fontSize:13.5,fontWeight:600,color:v.includes("not deployed")?RED.text:INK,wordBreak:"break-all" }}>{v}</div>
                         </div>
                       ))}
                     </div>
-                    <Btn onClick={pay} loading={busy}>Pay 50 A-Token</Btn>
+                    <Btn onClick={pay} loading={busy} disabled={!merchantAddr || busy}>Pay {DEMO_AMOUNT_DISPLAY} test asset</Btn>
                     {payStatus && <div style={{ marginTop:10,fontSize:13,color:MUTED,textAlign:"center" }}>{payStatus}</div>}
                   </>
                 )}
@@ -398,11 +279,11 @@ export default function DemoPage() {
               </Card>
             )}
 
-            {/* Step 3: Dispute */}
-            {step >= 3 && (
-              <Card accent={step===3}>
-                <StepHeader n="4" title="Open Dispute" subtitle="Only the original A-Pass-verified payer can open this" active={step===3} done={step>3} />
-                {step === 3 && (
+            {/* Step 2: Dispute */}
+            {step >= 2 && (
+              <Card accent={step===2}>
+                <StepHeader n="3" title="Open Dispute" subtitle="Only the original payer can open this" active={step===2} done={step>2} />
+                {step === 2 && (
                   <>
                     <div style={{ padding:"12px 14px",background:RED.bg,border:`1px solid ${RED.border}`,borderRadius:10,marginBottom:16,fontSize:14,color:RED.text }}>
                       Scenario: the merchant received payment but has not delivered the goods.
@@ -421,16 +302,16 @@ export default function DemoPage() {
               </Card>
             )}
 
-            {/* Step 4: Resolve */}
-            {step >= 4 && (
-              <Card accent={step===4}>
-                <StepHeader n="5" title="Arbiter Resolves" subtitle="CCP screens the refund leg. Funds return only to the verified payer wallet." active={step===4} done={step>4} />
-                {step === 4 && (
+            {/* Step 3: Resolve */}
+            {step >= 3 && (
+              <Card accent={step===3}>
+                <StepHeader n="4" title="Arbiter Resolves" subtitle="Funds return to the payer if the merchant doesn't respond in time." active={step===3} done={step>3} />
+                {step === 3 && (
                   <>
                     <div style={{ background:CREAM,borderRadius:10,padding:"14px 16px",marginBottom:18,fontSize:14,color:MUTED,lineHeight:1.6 }}>
                       <div>Merchant response window: <strong style={{ color:INK }}>24 hours</strong></div>
                       <div>Merchant responded: <strong style={{ color:RED.text }}>No</strong></div>
-                      <div style={{ marginTop:8 }}>Resolving in favour of the customer. Refund leg is CCP-screened before execution.</div>
+                      <div style={{ marginTop:8 }}>Resolving in favour of the payer.</div>
                     </div>
                     <Btn onClick={resolve} loading={busy}>Resolve and Refund to Source</Btn>
                   </>
@@ -438,22 +319,22 @@ export default function DemoPage() {
               </Card>
             )}
 
-            {/* Step 5: Audit */}
-            {step >= 5 && (
+            {/* Step 4: Audit */}
+            {step >= 4 && (
               <Card accent>
-                <StepHeader n="6" title="Audit Bundle" subtitle="Every step signed and exportable for regulators" active done />
+                <StepHeader n="5" title="Audit Bundle" subtitle="Every step signed and exportable" active done />
                 <div style={{ display:"flex",alignItems:"center",gap:12,padding:"14px 16px",background:GREEN.bg,border:`1px solid ${GREEN.border}`,borderRadius:12,marginBottom:20 }}>
                   <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="10" fill={GREEN.bg} stroke={GREEN.border} strokeWidth="1.5"/><path d="M7 11l3 3 5-5" stroke={GREEN.text} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   <div>
                     <div style={{ fontWeight:700,color:GREEN.text,fontSize:15 }}>Refund complete</div>
-                    <div style={{ fontSize:13,color:MUTED,marginTop:2 }}>50 A-Token returned to original verified payer wallet. Refund-to-source enforced by PayHub.</div>
+                    <div style={{ fontSize:13,color:MUTED,marginTop:2 }}>{DEMO_AMOUNT_DISPLAY} test asset returned to the original payer wallet. Refund-to-source enforced by payhub-escrow.</div>
                   </div>
                 </div>
 
                 {audit && (
                   <div style={{ border:`1px solid ${BORDER}`,borderRadius:12,overflow:"hidden" }}>
                     <div style={{ background:CREAM,padding:"12px 16px",borderBottom:`1px solid ${BORDER}`,display:"flex",alignItems:"center",justifyContent:"space-between" }}>
-                      <span style={{ fontSize:14,fontWeight:700 }}>Compliance Audit Report</span>
+                      <span style={{ fontSize:14,fontWeight:700 }}>Resolution Audit Report</span>
                       <button onClick={() => {
                         const b = new Blob([JSON.stringify(audit,null,2)],{type:"application/json"});
                         const u = URL.createObjectURL(b); const a = document.createElement("a");
@@ -464,15 +345,10 @@ export default function DemoPage() {
                     </div>
                     <div style={{ padding:"16px" }}>
                       {[
-                        ["Payment ID",    audit.payment?.id],
-                        ["Status",        audit.payment?.status],
-                        ["Payer A-Pass",  audit.identity?.payerAPass],
-                        ["Merchant A-Pass",audit.identity?.merchantAPass],
-                        ["Travel Rule",   audit.compliance?.travelRule?.[0]],
-                        ["CCP Payment",   audit.compliance?.ccpPayment?.cleared?"Cleared":"Blocked"],
-                        ["CCP Refund",    audit.compliance?.ccpRefund?.cleared?"Cleared":"Blocked"],
-                        ["Resolution",    audit.resolution?.verdict],
-                        ["Resolved at",   audit.resolution?.resolvedAt],
+                        ["Payment ID",  audit.payment?.id],
+                        ["Status",      audit.payment?.status],
+                        ["Resolution",  audit.resolution?.verdict],
+                        ["Resolved at", audit.resolution?.resolvedAt],
                       ].map(([k,v]) => v ? (
                         <div key={k} style={{ display:"flex",justifyContent:"space-between",gap:16,padding:"8px 0",borderBottom:`1px solid #F5F4F0`,fontSize:13 }}>
                           <span style={{ color:MUTED,fontWeight:500,flexShrink:0 }}>{k}</span>
@@ -497,40 +373,6 @@ export default function DemoPage() {
         </div>
       </div>
       <style>{`@keyframes phspin{to{transform:rotate(360deg)}}`}</style>
-
-      {/* Wallet picker modal */}
-      {walletOpen && (
-        <div onClick={() => setWalletOpen(false)} style={{ position:"fixed",inset:0,zIndex:200,background:"rgba(13,17,23,.52)",backdropFilter:"blur(5px)",display:"flex",alignItems:"center",justifyContent:"center",padding:24 }}>
-          <div onClick={e => e.stopPropagation()} style={{ background:"#fff",borderRadius:20,padding:32,width:"100%",maxWidth:400,boxShadow:"0 40px 80px -24px rgba(13,17,23,.35)" }}>
-            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:24 }}>
-              <span style={{ fontSize:20,fontWeight:700,letterSpacing:"-.5px",color:INK }}>Connect a wallet</span>
-              <button onClick={() => setWalletOpen(false)} style={{ width:32,height:32,borderRadius:8,background:"#FAF9F6",border:"none",cursor:"pointer",fontSize:20,color:MUTED,lineHeight:"32px",fontFamily:"inherit" }}>×</button>
-            </div>
-            {error && <div style={{ background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#B91C1C" }}>{error}</div>}
-            <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
-              {[
-                { id:"metamask", label:"MetaMask",       sub:"Browser extension",         bg:"#F97316", letter:"M" },
-                { id:"okx",      label:"OKX Wallet",     sub:"Browser extension",         bg:"#000000", letter:"O" },
-                { id:"coinbase", label:"Coinbase Wallet", sub:"Browser extension",         bg:"#0052FF", letter:"C" },
-                { id:"injected", label:"Brave / Rainbow", sub:"Any other injected wallet", bg:"#6B5CE7", letter:"W" },
-              ].map(({ id, label, sub, bg, letter }) => (
-                <button key={id} onClick={() => connectWalletClick(id)} disabled={connecting}
-                  style={{ display:"flex",alignItems:"center",gap:14,padding:"14px 16px",border:`1px solid ${BORDER}`,borderRadius:12,background:"#fff",cursor:connecting?"wait":"pointer",fontFamily:"inherit",textAlign:"left",width:"100%",transition:"all .15s" }}
-                  onMouseEnter={e => { if (!connecting) { e.currentTarget.style.background="#FAF9F6"; e.currentTarget.style.borderColor=AMBER; }}}
-                  onMouseLeave={e => { e.currentTarget.style.background="#fff"; e.currentTarget.style.borderColor=BORDER; }}>
-                  <div style={{ width:40,height:40,borderRadius:11,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:16,color:"#fff",flexShrink:0 }}>{letter}</div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:15.5,fontWeight:600,color:INK }}>{label}</div>
-                    <div style={{ fontSize:13,color:"#9AA3AC",marginTop:2 }}>{sub}</div>
-                  </div>
-                  {connecting && <div style={{ width:16,height:16,border:"2px solid "+AMBER,borderTopColor:"transparent",borderRadius:"50%",flexShrink:0,animation:"phspin .6s linear infinite" }} />}
-                </button>
-              ))}
-            </div>
-            <p style={{ fontSize:12.5,color:"#B0B8C1",textAlign:"center",marginTop:20,lineHeight:1.55 }}>Signs transactions on behalf of the agent on Monad Testnet.</p>
-          </div>
-        </div>
-      )}
     </>
   );
 }

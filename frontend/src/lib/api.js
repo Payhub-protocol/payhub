@@ -11,10 +11,8 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
-  preflight:        (body)              => request("/api/payments/preflight", { method: "POST", body: JSON.stringify(body) }),
   registerPayment:  (body)              => request("/api/payments/register",  { method: "POST", body: JSON.stringify(body) }),
   getPayment:       (id)                => request(`/api/payments/${id}`),
-  disputePreflight: (id, callerAddress) => request(`/api/payments/${id}/dispute/preflight`, { method: "POST", body: JSON.stringify({ callerAddress }) }),
   registerDispute:  (id, body)          => request(`/api/payments/${id}/dispute/register`,  { method: "POST", body: JSON.stringify(body) }),
   resolve:          (id, body)          => request(`/api/payments/${id}/resolve`, { method: "POST", body: JSON.stringify(body) }),
   autoResolve:      (id)                => request(`/api/payments/${id}/auto-resolve`, { method: "POST", body: JSON.stringify({}) }),

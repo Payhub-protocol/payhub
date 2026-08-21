@@ -3,7 +3,15 @@ import { useState } from "react";
 import { connectWallet } from "../../lib/wallet";
 import { api } from "../../lib/api";
 import Link from "next/link";
-import { ethers } from "ethers";
+
+// Soroban amounts are raw i128 stroops (7 decimals for most Stellar assets).
+function formatAmount(raw) {
+  if (raw == null) return "—";
+  const n = BigInt(raw);
+  const whole = n / 10_000_000n;
+  const frac = (n % 10_000_000n).toString().padStart(7, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : `${whole}`;
+}
 
 const AMBER  = "#E8A020";
 const INK    = "#0D1117";
@@ -54,8 +62,7 @@ export default function DashboardPage() {
   async function connectClick() {
     setWalletBusy(true);
     try {
-      if (!window.ethereum) throw new Error("MetaMask not found");
-      const w = await connectWallet(window.ethereum);
+      const w = await connectWallet();
       setWallet(w);
     } catch (e) { setError(e.message); } finally { setWalletBusy(false); }
   }
@@ -78,8 +85,7 @@ export default function DashboardPage() {
   }
 
   const status = payment?.onChain?.status;
-  const amount = payment?.onChain?.amount
-    ? ethers.formatUnits(payment.onChain.amount, 6) + " A-Token" : "—";
+  const amount = payment?.onChain?.amount ? formatAmount(payment.onChain.amount) : "—";
 
   return (
     <>
@@ -114,13 +120,13 @@ export default function DashboardPage() {
           <div style={{ marginBottom:36 }}>
             <div style={{ fontSize:12,fontWeight:700,color:"#C8841A",letterSpacing:".4px",textTransform:"uppercase",marginBottom:10 }}>Arbiter Panel</div>
             <h1 style={{ fontSize:"clamp(24px,3.5vw,36px)",letterSpacing:"-1.2px",fontWeight:700,marginBottom:8 }}>Payment inspector</h1>
-            <p style={{ fontSize:15,color:MUTED }}>Look up any payment by ID to inspect its compliance trail, dispute status, and signed audit bundle.</p>
+            <p style={{ fontSize:15,color:MUTED }}>Look up any payment by ID to inspect its status, dispute state, and signed audit bundle.</p>
           </div>
 
           {/* Lookup */}
           <div style={{ display:"flex",gap:10,marginBottom:24 }}>
             <input value={lookup} onChange={e => setLookup(e.target.value)} onKeyDown={e => e.key==="Enter" && lookupPayment()}
-              placeholder="0x... payment ID"
+              placeholder="Payment ID (e.g. 0)"
               style={{ flex:1,padding:"11px 14px",border:`1px solid ${BORDER}`,borderRadius:10,fontSize:14,fontFamily:"'Space Grotesk',monospace",color:INK,outline:"none" }}
               onFocus={e => e.currentTarget.style.borderColor=AMBER}
               onBlur={e => e.currentTarget.style.borderColor=BORDER} />
@@ -151,9 +157,6 @@ export default function DashboardPage() {
                     ["Amount",       amount],
                     ["Payer",        payment.onChain?.payer?.slice(0,14)+"..."],
                     ["Merchant",     payment.onChain?.merchant?.slice(0,14)+"..."],
-                    ["Payer A-Pass", payment.apassPayer||payment.onChain?.apassPayer||"—"],
-                    ["Merch A-Pass", payment.apassMerchant||payment.onChain?.apassMerchant||"—"],
-                    ["Travel Rule",  payment.travelRuleId||"—"],
                   ].map(([k,v]) => (
                     <div key={k} style={{ background:CREAM,borderRadius:10,padding:"10px 14px" }}>
                       <div style={{ fontSize:11.5,color:MUTED,fontWeight:600,marginBottom:3,textTransform:"uppercase",letterSpacing:".2px" }}>{k}</div>
@@ -168,29 +171,11 @@ export default function DashboardPage() {
                 )}
               </div>
 
-              {/* Compliance indicators */}
-              <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10 }}>
-                {[
-                  ["A-Pass Payer",    !!(payment.apassPayer||payment.onChain?.apassPayer)],
-                  ["A-Pass Merchant", !!(payment.apassMerchant||payment.onChain?.apassMerchant)],
-                  ["CCP Cleared",     true],
-                  ["Travel Rule",     !!(payment.travelRuleId)],
-                ].map(([label,ok]) => (
-                  <div key={label} style={{ padding:"12px 14px",borderRadius:10,border:`1px solid ${ok?GREEN.border:BORDER}`,background:ok?GREEN.bg:CREAM,display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:600,color:ok?GREEN.text:MUTED }}>
-                    {ok
-                      ? <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7l3 3 7-6" stroke={GREEN.text} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                      : <div style={{ width:12,height:12,borderRadius:"50%",border:`2px solid ${BORDER}` }} />
-                    }
-                    {label}
-                  </div>
-                ))}
-              </div>
-
               {/* Audit */}
               {audit && (
                 <div style={{ background:"#fff",border:`1px solid ${GREEN.border}`,borderRadius:16,padding:"24px" }}>
                   <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18 }}>
-                    <div style={{ fontSize:16,fontWeight:700 }}>Compliance Audit Report</div>
+                    <div style={{ fontSize:16,fontWeight:700 }}>Resolution Audit Report</div>
                     <button onClick={() => {
                       const b = new Blob([JSON.stringify(audit,null,2)],{type:"application/json"});
                       const u = URL.createObjectURL(b); const a = document.createElement("a");
@@ -201,10 +186,6 @@ export default function DashboardPage() {
                   </div>
                   {[
                     ["Status",        audit.payment?.status],
-                    ["Payer A-Pass",  audit.identity?.payerAPass],
-                    ["Merchant A-Pass",audit.identity?.merchantAPass],
-                    ["CCP Payment",   audit.compliance?.ccpPayment?.cleared?"Cleared":"Blocked"],
-                    ["CCP Refund",    audit.compliance?.ccpRefund?.cleared?"Cleared":"—"],
                     ["Verdict",       audit.resolution?.verdict],
                     ["Resolved at",   audit.resolution?.resolvedAt],
                   ].map(([k,v]) => v ? <Row key={k} label={k} value={v} /> : null)}
