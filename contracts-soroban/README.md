@@ -17,7 +17,7 @@ The Cleanverse compliance gate — A-Pass identity verification and CCP/Travel-R
 `PayHub.sol` indexed every payment by payer and by merchant (`payerPayments`, `merchantPayments`, with `getPayerPayments`/`getMerchantPayments` view functions) so a wallet could list all its payments on-chain. This port does **not** carry that over yet — `get_payment(id)` requires knowing the id. Adding it back means an append-only per-address index in persistent storage, the same pattern `tributary`'s `DataKey::Created(Address)` already uses (see `contracts/splitter/src/lib.rs`); it's a reasonable next task, just not done here.
 
 ## Status
-**Verified — `cargo test` passes (4/4) and the release wasm build succeeds**, via WSL (`soroban-sdk` bumped from `22.0.0` to `27.0.0` to match `tributary`, since `22.0.11`'s testutils don't compile against current transitive dependency versions). Contract logic has not been audited or deployed anywhere; treat it as a working first draft, not something to put real funds through yet.
+**Verified and deployed to Stellar testnet.** `cargo test` passes (4/4), the release wasm build succeeds, and the contract is live at [`CAKUPKIQ5QMIUNSJXO5Q46S54HEPFPUGS6P5A5KG72BFQOTIK6NAUVN6`](https://stellar.expert/explorer/testnet/contract/CAKUPKIQ5QMIUNSJXO5Q46S54HEPFPUGS6P5A5KG72BFQOTIK6NAUVN6), initialized with a single deployer key as owner/arbiter/fee_recipient. Contract logic has not been audited, and the frontend hasn't been wired to this deployment yet — treat it as a working, live-on-testnet first draft, not something to put real funds through.
 
 ```bash
 cd contracts-soroban
