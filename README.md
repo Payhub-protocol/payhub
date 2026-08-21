@@ -1,179 +1,112 @@
 # PayHub
 
-**Dispute and chargeback rail for AI agent payments on Monad.**
+**Escrow and dispute rail for AI agent payments, on Stellar.**
 
-Built for the [Cleanverse Verified Finance Hackathon](https://cleanverse.com). PayHub is protocol infrastructure — a dispute, escrow, and compliance layer that any agent payment system can plug into. It is not a consumer app; it is the recourse mechanism that sits underneath one.
+PayHub is protocol infrastructure — an on-chain escrow, dispute, and refund layer that any agent payment system can plug into. It is not a consumer app; it is the recourse mechanism that sits underneath one. Payments are held in a Soroban smart contract rather than transferred directly, giving both payer and merchant a bounded window to dispute before funds settle.
 
-[![Live Demo](https://img.shields.io/badge/demo-trypayhub.vercel.app-E8A020?style=flat&logo=vercel&logoColor=black)](https://trypayhub.vercel.app)
-[![Demo Video](https://img.shields.io/badge/demo_video-YouTube-FF0000?style=flat&logo=youtube&logoColor=white)](https://youtu.be/SDXThRLcHqY)
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/IamHarrie-Labs/payhub&root=frontend)
+> **Status:** The Soroban contract (`payhub-escrow`) is written, passes its test suite, and builds to a deployable wasm artifact — see [`contracts-soroban/README.md`](contracts-soroban/README.md) for exact status. It has not yet been deployed to Stellar testnet. No live demo or demo video exists yet for this version.
 
 ---
 
 ## The problem
 
-AI agents can initiate payments. What they can't do is recover from a payment that goes wrong. When an agent pays a merchant and the merchant doesn't deliver, there's no identity-bound recourse: no compliance trail an auditor could verify, no refund path a financial regulator would accept.
+AI agents can initiate payments. What they can't do is recover from a payment that goes wrong. When an agent pays a merchant and the merchant doesn't deliver, there's no recourse path enforced by anything other than trust.
 
-PayHub fixes that. Every payment is escrowed on-chain, both parties are A-Pass verified before a single token moves, and any refund is CCP-screened before execution — with a tamper-evident audit bundle at the end.
+PayHub fixes that. Every payment is escrowed on-chain; a payer has a fixed window to open a dispute; a merchant has a fixed window to respond; and if they don't, funds are refunded automatically. No backend has to be online, and no party can bypass `require_auth()` to act on someone else's behalf.
 
 ---
 
 ## How it works
 
 ```
-Agent payment system                PayHub                        Monad chain
-        │                              │                               │
-        │── POST /api/payments/preflight ──►                           │
-        │   A-Pass + CCP + Travel Rule check                           │
-        │◄── { cleared: true, apassPayer, apassMerchant } ────────────│
-        │                              │                               │
-        │── initiatePayment() ────────────────────────────────────────►│
-        │                              │         funds held in escrow  │
-        │── POST /api/payments/register ──►                            │
-        │                              │                               │
-        │         [finality window — 3 days default]                   │
-        │                              │                               │
-        │── openDispute() ────────────────────────────────────────────►│
-        │── POST /api/payments/:id/dispute/preflight ──►               │
-        │   (re-verifies payer A-Pass before submitting)               │
-        │── POST /api/payments/:id/dispute/register  ──►               │
-        │                              │                               │
-        │         [arbiter reviews, CCP screens refund]                │
-        │                              │                               │
-        │── POST /api/payments/:id/resolve ──►                         │
-        │                              │── resolveDispute() ──────────►│
-        │◄── { audit } ────────────────│                               │
-        │                              │                               │
-        │── GET /api/payments/:id/audit ──►                            │
-        │◄── signed audit bundle ──────│                               │
+Agent payment system            PayHub API                payhub-escrow (Soroban)
+        │                            │                              │
+        │── initiate_payment() ─────────────────────────────────────►│
+        │   (signed via Freighter)   │        funds held in escrow   │
+        │── POST /api/payments/register ──►                          │
+        │                            │                                │
+        │      [finality window — 3 days default]                    │
+        │                            │                                │
+        │── open_dispute() ─────────────────────────────────────────►│
+        │── POST /api/payments/:id/dispute/register ──►               │
+        │                            │                                │
+        │      [merchant response window — 24h default]              │
+        │                            │                                │
+        │── POST /api/payments/:id/resolve ──►                        │
+        │                            │── resolve_dispute() ──────────►│
+        │◄── { audit } ──────────────│                                │
+        │                            │                                │
+        │── GET /api/payments/:id/audit ──►                           │
+        │◄── signed audit bundle ────│                                │
 ```
 
 ---
 
 ## Integrating PayHub into your protocol
 
-PayHub exposes a simple REST API. Add dispute resolution to your agent payment system in three steps.
+PayHub exposes a small REST API alongside the on-chain contract. Most state lives on-chain and is read directly; the API only stores off-chain context (order IDs, dispute reasons) and drives arbiter resolution.
 
-### Step 1 — Run compliance preflight before any on-chain call
-
-```js
-const preflight = await fetch("/api/payments/preflight", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    payerAddress:    agentWallet,       // the paying agent's wallet
-    merchantAddress: merchantWallet,    // the merchant wallet
-    amount:          "50000000",        // in token base units (6 decimals for aUSDC)
-    asset:           ATOKEN_ADDRESS,    // the A-Token contract address
-    orderId:         "your-order-id",
-  }),
-}).then(r => r.json());
-
-if (!preflight.cleared) throw new Error("Compliance check failed");
-
-// preflight.apassPayer    — Cleanverse A-Pass ID for payer   (pass to contract)
-// preflight.apassMerchant — Cleanverse A-Pass ID for merchant (pass to contract)
-// preflight.travelRuleId  — Travel Rule reference
-```
-
-### Step 2 — Call initiatePayment on-chain, then register with the backend
+### Step 1 — Payer signs `initiate_payment` via Freighter, then register it
 
 ```js
-// On-chain (ethers.js)
-const tx = await payhubContract.initiatePayment(
-  merchantWallet,
-  ATOKEN_ADDRESS,
-  amount,
-  orderId,
-  preflight.apassPayer,    // stored on-chain for audit trail
-  preflight.apassMerchant,
-  0                        // 0 = use default 3-day finality window
-);
-const receipt = await tx.wait();
+import { connectWallet, initiatePayment } from "./lib/wallet";
 
-// Extract paymentId from PaymentInitiated event
-const event = receipt.logs
-  .map(l => { try { return payhubInterface.parseLog(l); } catch { return null; } })
-  .find(e => e?.name === "PaymentInitiated");
-const paymentId = event.args.paymentId;
+const wallet = await connectWallet();
+const { txHash, paymentId } = await initiatePayment(wallet, {
+  merchant: merchantAddress,
+  token:    assetContractId,   // Soroban token/asset contract id
+  amount:   "500000000",       // raw i128 stroops (7 decimals)
+  orderId:  "your-order-id",
+});
 
-// Register with backend (attaches Travel Rule + compliance metadata)
 await fetch("/api/payments/register", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    paymentId, orderId, payerAddress, merchantAddress,
-    amount, asset: ATOKEN_ADDRESS,
-    apassPayer:   preflight.apassPayer,
-    apassMerchant: preflight.apassMerchant,
-    travelRuleId: preflight.travelRuleId,
-    txHash:       receipt.hash,
-  }),
+  body: JSON.stringify({ paymentId, orderId, payerAddress: wallet.address, merchantAddress, amount, asset: assetContractId, txHash }),
 });
 ```
 
-### Step 3 — Let your users open disputes
+### Step 2 — Let your users open disputes
 
 ```js
-// Verify identity before submitting the on-chain transaction
-const check = await fetch(`/api/payments/${paymentId}/dispute/preflight`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ callerAddress: userWallet }),
-}).then(r => r.json());
+import { openDisputeOnChain } from "./lib/wallet";
 
-if (!check.eligible) throw new Error(check.error);
+const { txHash } = await openDisputeOnChain(wallet, paymentId, "Goods not delivered");
 
-// Submit dispute on-chain
-const tx = await payhubContract.openDispute(paymentId, "Goods not delivered");
-await tx.wait();
-
-// Register the dispute
 await fetch(`/api/payments/${paymentId}/dispute/register`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ reason: "Goods not delivered", txHash: tx.hash }),
+  body: JSON.stringify({ reason: "Goods not delivered", txHash }),
 });
 ```
 
-### Contract ABI (minimum required)
+### Contract functions (minimum required)
 
-```solidity
-function initiatePayment(
-  address merchant,
-  address token,
-  uint256 amount,
-  string  orderId,
-  string  apassPayer,      // A-Pass ID from preflight response
-  string  apassMerchant,   // A-Pass ID from preflight response
-  uint256 customFinality   // 0 = use 3-day default
-) external returns (bytes32 paymentId)
+```rust
+// contracts-soroban/payhub-escrow/src/lib.rs
 
-function openDispute(bytes32 paymentId, string reason) external
-
-function respondToDispute(bytes32 paymentId, string evidence) external
-
-function resolveDispute(bytes32 paymentId, bool inFavorOfPayer, string verdict) external
-
-function autoResolveExpiredDispute(bytes32 paymentId) external
+initiate_payment(env, payer, merchant, token, amount, order_id, custom_finality) -> Result<u64, Error>
+claim_payment(env, id) -> Result<(), Error>
+open_dispute(env, id, reason) -> Result<(), Error>
+respond_to_dispute(env, id, evidence) -> Result<(), Error>
+resolve_dispute(env, caller, id, in_favor_of_payer) -> Result<(), Error>
+auto_resolve_expired_dispute(env, id) -> Result<(), Error>
 ```
 
-**Deployed contract:** [`0x7BBDa4409e300eaDB0A61F137498480c96173C9e`](https://testnet.monad.xyz/address/0x7BBDa4409e300eaDB0A61F137498480c96173C9e) on Monad Testnet (Chain ID: 10143)
+**Deployed contract:** not yet deployed. Once live on Stellar testnet, the contract id will be recorded in `deployment.json` and `.env.example`.
 
 ---
 
-## Cleanverse compliance primitives
+## Design notes
 
-| Primitive | Where enforced | What it does |
-|-----------|---------------|--------------|
-| **A-Pass** | `preflight` | Both payer and merchant identity verified before payment |
-| **A-Pass** | `dispute/preflight` | Payer identity re-verified at dispute time |
-| **CCP** | `preflight` | Payment leg screened against AML + sanctions |
-| **CCP** | `resolve` | Refund leg screened before execution |
-| **Travel Rule** | Both legs | Originator/beneficiary metadata attached automatically |
-| **A-Token** | Escrow contract | Compliant stablecoin (aUSDC) held in PayHub escrow |
+Where this differs from the original Solidity version built for Monad, and why:
 
-No on-chain transaction is submitted without a backend compliance pre-check. The smart contract stores A-Pass IDs on-chain for a permanent audit trail.
+| Difference | Why |
+|---|---|
+| No `msg.sender` | Soroban has no implicit caller identity — every privileged action takes an explicit `Address` and calls `.require_auth()` on it |
+| `u64` payment ids, not hashes | Sequential integers returned by the contract, matching the pattern used by [`tributary`](https://github.com/Payhub-protocol/payhub)'s splitter contract |
+| Typed `#[contracterror]` errors | Numeric codes instead of `require(..., "string")` reverts |
+| No compliance gate | The original Monad version verified both parties' identity and screened transfers via a third-party compliance API before any token moved. That has no Stellar equivalent and was dropped entirely, not stubbed — this version has no identity-verification or transfer-screening step of any kind |
 
 ---
 
@@ -181,10 +114,10 @@ No on-chain transaction is submitted without a backend compliance pre-check. The
 
 | Status | Description |
 |--------|-------------|
-| `PENDING` | Funds escrowed, finality window active |
-| `SETTLED` | Merchant claimed after window — no dispute possible |
-| `DISPUTED` | Payer opened dispute before window closed |
-| `REFUNDED` | Arbiter resolved in payer's favour — funds returned to source wallet |
+| `Pending` | Funds escrowed, finality window active |
+| `Settled` | Merchant claimed after window — no dispute possible |
+| `Disputed` | Payer opened dispute before window closed |
+| `Refunded` | Arbiter resolved in payer's favour, or the merchant response window expired — funds returned to source wallet |
 
 Default windows (all configurable by contract owner):
 
@@ -199,18 +132,16 @@ Default windows (all configurable by contract owner):
 
 ## API reference
 
-Base URL: your deployed Vercel URL or `http://localhost:3000` locally.
+Base URL: your deployed URL or `http://localhost:3000` locally. Full reference at [`/docs`](frontend/src/app/docs/page.jsx) once running.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/api/health` | Service health check |
-| `POST` | `/api/payments/preflight` | A-Pass + CCP + Travel Rule pre-check |
-| `POST` | `/api/payments/register` | Store compliance metadata after on-chain tx |
-| `GET`  | `/api/payments/:id` | Fetch payment + on-chain status |
-| `POST` | `/api/payments/:id/dispute/preflight` | Verify payer identity before dispute |
-| `POST` | `/api/payments/:id/dispute/register` | Store dispute metadata |
-| `POST` | `/api/payments/:id/resolve` | Arbiter resolves; CCP screens refund first |
-| `POST` | `/api/payments/:id/auto-resolve` | Auto-refund after merchant misses response window |
+| `POST` | `/api/payments/register` | Store off-chain metadata after on-chain `initiate_payment` |
+| `GET`  | `/api/payments/:id` | Fetch payment, merging stored metadata with live on-chain state |
+| `POST` | `/api/payments/:id/dispute/register` | Store dispute metadata after on-chain `open_dispute` |
+| `POST` | `/api/payments/:id/resolve` | Arbiter resolves on-chain and generates the signed audit bundle |
+| `POST` | `/api/payments/:id/auto-resolve` | Auto-refund after merchant misses the response window |
 | `GET`  | `/api/payments/:id/audit` | Fetch signed HMAC audit bundle |
 
 ---
@@ -219,37 +150,25 @@ Base URL: your deployed Vercel URL or `http://localhost:3000` locally.
 
 ```
 payhub/
-├── contracts/
-│   ├── contracts/
-│   │   ├── PayHub.sol          # Escrow + dispute contract
-│   │   └── MockERC20.sol       # Test token (freely mintable)
-│   ├── scripts/
-│   │   ├── deploy.js           # Deploy PayHub
-│   │   └── deploy_mock.js      # Deploy + mint MockERC20 for demo
-│   ├── test/
-│   │   └── PayHub.test.js      # 7 contract tests
-│   └── hardhat.config.js
-├── backend/                    # Standalone Express server (optional — same logic lives in frontend/src/app/api/)
-│   └── src/
-│       ├── index.js
-│       ├── cleanverse.js
-│       ├── chain.js
-│       └── audit.js
-├── frontend/                   # Next.js 15 app — deploy this to Vercel
+├── contracts-soroban/           # Current Rust/Soroban contract (Stellar)
+│   └── payhub-escrow/
+│       └── src/lib.rs
+├── contracts/                   # Original Solidity contract (Monad) — retained for reference
+├── backend/                     # Original standalone Express server (Monad) — retained for reference
+├── frontend/                    # Next.js 15 app, adapted for Freighter + Soroban
 │   └── src/
 │       ├── app/
-│       │   ├── page.jsx        # Landing page
-│       │   ├── demo/           # Interactive demo flow
-│       │   ├── docs/           # API reference
-│       │   ├── dashboard/      # Arbiter payment inspector
-│       │   └── api/            # Next.js API routes (backend logic)
-│       │       └── payments/   # All payment + dispute endpoints
+│       │   ├── page.jsx         # Landing page
+│       │   ├── demo/            # Interactive demo flow
+│       │   ├── docs/            # API reference
+│       │   ├── dashboard/       # Arbiter payment inspector
+│       │   └── api/             # Next.js API routes (backend logic)
 │       └── lib/
-│           ├── server/         # Server-side modules (cleanverse, chain, audit)
-│           ├── wallet.js       # MetaMask connector + contract helpers
-│           └── api.js          # API client (relative URLs)
-├── deployment.json             # Deployed contract addresses
-└── .env.example                # All required env vars
+│           ├── server/          # Server-side modules (chain, audit)
+│           ├── wallet.js        # Freighter connector + Soroban contract calls
+│           └── api.js           # API client (relative URLs)
+├── deployment.json              # Deployed contract addresses (stale — Monad; pending Stellar redeploy)
+└── .env.example                 # All required env vars
 ```
 
 ---
@@ -259,14 +178,14 @@ payhub/
 ### Prerequisites
 
 - Node.js 18+
-- MetaMask with Monad Testnet configured (Chain ID: 10143)
-- Testnet MON from the [Monad faucet](https://faucet.monad.xyz)
-- Cleanverse sandbox credentials (from [cleanverse.com](https://cleanverse.com))
+- Rust + the `wasm32v1-none` target (see [`contracts-soroban/README.md`](contracts-soroban/README.md) — on Windows, build and test from WSL, not natively)
+- [Freighter](https://freighter.app) wallet extension, set to Testnet
+- Testnet XLM from [Friendbot](https://lab.stellar.org/account/fund?$=network$id=testnet)
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/IamHarrie-Labs/payhub.git
+git clone https://github.com/Payhub-protocol/payhub.git
 cd payhub
 npm run install:all
 ```
@@ -275,104 +194,39 @@ npm run install:all
 
 ```bash
 cp .env.example .env
-# Fill in your values, then:
-cp .env backend/.env
 cp .env frontend/.env.local
 ```
 
-Required values:
+See `.env.example` for the full list — Soroban RPC URL, the contract id (filled in after deploy), and the arbiter's secret key.
 
-```env
-CLEANVERSE_API_BASE=https://uatapi.cleanverse.com/api/cooperate
-CLEANVERSE_APP_ID=your_app_id
-CLEANVERSE_API_KEY=your_api_key
-
-MONAD_RPC_URL=https://testnet-rpc.monad.xyz
-DEPLOYER_PRIVATE_KEY=0x...
-ARBITER_PRIVATE_KEY=0x...
-ARBITER_ADDRESS=0x...
-FEE_RECIPIENT=0x...
-
-PAYHUB_CONTRACT_ADDRESS=0x...      # filled after deploy
-NEXT_PUBLIC_PAYHUB_CONTRACT=0x...  # same address
-NEXT_PUBLIC_ATOKEN_ADDRESS=0x...   # A-Token to use (aUSDC or MockERC20)
-
-ARBITER_AUTH_TOKEN=your_secret_token
-AUDIT_SIGNING_SECRET=your_signing_secret
-```
-
-> **Mock mode:** if `CLEANVERSE_APP_ID` or `CLEANVERSE_API_KEY` is not set, the backend returns realistic fixture data so the demo runs without live credentials.
-
-### 3. Deploy a test token (optional — for sandbox without real aUSDC)
+### 3. Build and test the contract
 
 ```bash
-cd contracts
-npx hardhat run scripts/deploy_mock.js --network monad_testnet
-# Outputs: MOCK_ATOKEN=0x...
-# Set NEXT_PUBLIC_ATOKEN_ADDRESS to that address
+cd contracts-soroban
+cargo test
+cargo build --release --target wasm32v1-none -p payhub-escrow
 ```
 
-### 4. Deploy the contract
+### 4. Deploy to Stellar testnet
 
 ```bash
-cd contracts
-npx hardhat compile
-npx hardhat test           # all 7 tests should pass
-npx hardhat run scripts/deploy.js --network monad_testnet
-# Outputs: PayHub deployed: 0x...
-# Update PAYHUB_CONTRACT_ADDRESS and NEXT_PUBLIC_PAYHUB_CONTRACT in .env
+stellar keys generate deployer --network testnet --fund
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/payhub_escrow.wasm \
+  --source deployer --network testnet
+# Update PAYHUB_CONTRACT_ID and NEXT_PUBLIC_PAYHUB_CONTRACT in .env
 ```
 
-### 5. Run locally
+### 5. Run the frontend locally
 
 ```bash
 cd frontend
 npm run dev
 # → http://localhost:3000
-# API available at http://localhost:3000/api/*
 ```
-
-The Next.js API routes handle all backend logic — no separate server needed.
-
----
-
-## Deploy to Vercel
-
-1. Push this repo to GitHub
-2. Import the repo in [Vercel](https://vercel.com/new)
-3. Set **Root Directory** to `frontend`
-4. Add these environment variables in the Vercel dashboard:
-
-```
-CLEANVERSE_API_BASE
-CLEANVERSE_APP_ID
-CLEANVERSE_API_KEY
-MONAD_RPC_URL
-ARBITER_PRIVATE_KEY
-PAYHUB_CONTRACT_ADDRESS
-NEXT_PUBLIC_PAYHUB_CONTRACT
-NEXT_PUBLIC_ATOKEN_ADDRESS
-NEXT_PUBLIC_ARBITER_TOKEN
-ARBITER_AUTH_TOKEN
-AUDIT_SIGNING_SECRET
-```
-
-5. Deploy — done. Both the frontend and the API run from the same Vercel project.
-
----
-
-## Monad Testnet
-
-| Field | Value |
-|-------|-------|
-| Network name | Monad Testnet |
-| RPC URL | `https://testnet-rpc.monad.xyz` |
-| Chain ID | `10143` |
-| Currency | MON |
-| Explorer | `https://testnet.monad.xyz` |
 
 ---
 
 ## License
 
-MIT
+Apache-2.0
