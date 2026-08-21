@@ -27,6 +27,9 @@ contracts/artifacts/
 contracts/cache/
 contracts/node_modules/
 
+# Rust / Soroban build artifacts
+contracts-soroban/target/
+
 # Env files (never commit secrets)
 .env
 .env.local
