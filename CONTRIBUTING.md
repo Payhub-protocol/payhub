@@ -5,7 +5,7 @@ Thanks for taking the time. This page covers how to get a working setup and what
 PayHub has three parts, and most changes touch only one:
 
 - `contracts-soroban/` — the Stellar/Soroban escrow contract (Rust)
-- `contracts/` — the original Solidity contract for Monad (Rust is now the primary target; treat Solidity changes as maintenance, not new feature work)
+- `archive/monad-solidity/` — the original Solidity contract for Monad. Superseded and archived; it is not built, tested, or deployed. Do not send changes here.
 - `backend/` and `frontend/` — the Express API and Next.js app (JavaScript)
 
 ## Setup
