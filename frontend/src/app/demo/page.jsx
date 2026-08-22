@@ -17,10 +17,12 @@ const DEMO_ORDER_ID = `demo_${Date.now()}`;
 // Soroban asset amounts are raw i128 stroops (7 decimals for most Stellar assets).
 const DEMO_AMOUNT_DISPLAY = "50";
 const DEMO_AMOUNT = 50n * 10_000_000n;
-// Placeholders until payhub-escrow and a test asset are deployed to testnet
-// (see contracts-soroban/README.md "Status").
-const TOKEN_ADDR = process.env.NEXT_PUBLIC_DEMO_TOKEN_CONTRACT || "C... (test asset not deployed yet)";
-const PAYHUB     = process.env.NEXT_PUBLIC_PAYHUB_CONTRACT || "C... (payhub-escrow not deployed yet)";
+// payhub-escrow is live on testnet (see deployment.json); both of these are
+// empty only when the env var is unset locally. NEXT_PUBLIC_DEMO_TOKEN_CONTRACT
+// has no default — point it at any Soroban token/asset contract for the demo.
+const TOKEN_ADDR = process.env.NEXT_PUBLIC_DEMO_TOKEN_CONTRACT || "";
+const PAYHUB     = process.env.NEXT_PUBLIC_PAYHUB_CONTRACT || "";
+const short = (id) => id.slice(0, 10) + "...";
 
 // ─── Shared atoms ─────────────────────────────────────────────────────────────
 function Btn({ onClick, disabled, loading, children, variant = "primary" }) {
@@ -262,10 +264,10 @@ export default function DemoPage() {
                         onBlur={e => e.currentTarget.style.borderColor=BORDER} />
                     </div>
                     <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:18 }}>
-                      {[["Order",DEMO_ORDER_ID.slice(0,22)+"..."],["Amount",`${DEMO_AMOUNT_DISPLAY} test asset`],["Token",TOKEN_ADDR.slice(0,10)+"..."],["Contract",PAYHUB.slice(0,10)+"..."]].map(([k,v]) => (
+                      {[["Order",DEMO_ORDER_ID.slice(0,22)+"...",false],["Amount",`${DEMO_AMOUNT_DISPLAY} test asset`,false],["Token",TOKEN_ADDR?short(TOKEN_ADDR):"not set",!TOKEN_ADDR],["Contract",PAYHUB?short(PAYHUB):"not set",!PAYHUB]].map(([k,v,missing]) => (
                         <div key={k} style={{ background:CREAM,borderRadius:10,padding:"10px 14px" }}>
                           <div style={{ fontSize:12,color:MUTED,fontWeight:500,marginBottom:3 }}>{k}</div>
-                          <div style={{ fontSize:13.5,fontWeight:600,color:v.includes("not deployed")?RED.text:INK,wordBreak:"break-all" }}>{v}</div>
+                          <div style={{ fontSize:13.5,fontWeight:600,color:missing?RED.text:INK,wordBreak:"break-all" }}>{v}</div>
                         </div>
                       ))}
                     </div>
