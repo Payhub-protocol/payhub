@@ -11,9 +11,10 @@ import {
 import * as freighter from "@stellar/freighter-api";
 
 // ─── Network config ───────────────────────────────────────────────────────────
-// NEXT_PUBLIC_PAYHUB_CONTRACT is a placeholder until payhub-escrow is deployed
-// to testnet (see contracts-soroban/README.md "Status"). Every call below will
-// fail with a clear "contract not deployed" error until that env var is set.
+// payhub-escrow is deployed and initialized on Stellar testnet — see
+// deployment.json for the live contract id. NEXT_PUBLIC_PAYHUB_CONTRACT still
+// has to be set locally (copy it from .env.example); every call below fails
+// with a clear error until it is.
 const NETWORK_PASSPHRASE = Networks.TESTNET;
 const RPC_URL = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const CONTRACT_ID = process.env.NEXT_PUBLIC_PAYHUB_CONTRACT || "";
@@ -25,8 +26,8 @@ function server() {
 function requireContractId() {
   if (!CONTRACT_ID) {
     throw new Error(
-      "NEXT_PUBLIC_PAYHUB_CONTRACT is not set. payhub-escrow has not been deployed to testnet yet " +
-        "(see contracts-soroban/README.md). Set it in .env.local once you have a contract id."
+      "NEXT_PUBLIC_PAYHUB_CONTRACT is not set. Copy the deployed testnet contract id " +
+        "from .env.example (or deployment.json) into frontend/.env.local."
     );
   }
   return CONTRACT_ID;
