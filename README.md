@@ -153,7 +153,7 @@ payhub/
 ├── contracts-soroban/           # Current Rust/Soroban contract (Stellar)
 │   └── payhub-escrow/
 │       └── src/lib.rs
-├── contracts/                   # Original Solidity contract (Monad) — retained for reference
+├── archive/monad-solidity/      # Original Solidity contract (Monad) — superseded, reference only
 ├── backend/                     # Original standalone Express server (Monad) — retained for reference
 ├── frontend/                    # Next.js 15 app, adapted for Freighter + Soroban
 │   └── src/
@@ -167,7 +167,7 @@ payhub/
 │           ├── server/          # Server-side modules (chain, audit)
 │           ├── wallet.js        # Freighter connector + Soroban contract calls
 │           └── api.js           # API client (relative URLs)
-├── deployment.json              # Deployed contract addresses (stale — Monad; pending Stellar redeploy)
+├── deployment.json              # Deployed addresses (stellar_testnet is current; monad is historical)
 └── .env.example                 # All required env vars
 ```
 
