@@ -1,6 +1,6 @@
 # payhub-escrow (Soroban port)
 
-A from-scratch Rust/Soroban rewrite of [`contracts/PayHub.sol`](../contracts/PayHub.sol), targeting Stellar instead of Monad.
+A from-scratch Rust/Soroban rewrite of [`archive/monad-solidity/PayHub.sol`](../archive/monad-solidity/PayHub.sol), targeting Stellar instead of Monad.
 
 ## What carried over
 The full escrow → dispute → resolve/refund state machine: `initiate_payment`, `claim_payment`, `open_dispute`, `respond_to_dispute`, `resolve_dispute`, `auto_resolve_expired_dispute`, plus the same platform-fee split on settlement.
