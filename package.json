@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "install:all":    "npm i --prefix frontend",
-    "contract:test":  "cargo test --manifest-path contracts-soroban/Cargo.toml",
+    "install:all": "npm i --prefix frontend",
+    "contract:test": "cargo test --manifest-path contracts-soroban/Cargo.toml",
     "contract:build": "cargo build --release --target wasm32v1-none -p payhub-escrow --manifest-path contracts-soroban/Cargo.toml",
-    "dev":            "npm run dev --prefix frontend",
-    "build":          "npm run build --prefix frontend",
-    "start":          "npm run start --prefix frontend"
+    "dev": "node init && npm run dev --prefix frontend",
+    "build": "node init && npm run build --prefix frontend",
+    "start": "node init && npm run start --prefix frontend"
   }
 }
