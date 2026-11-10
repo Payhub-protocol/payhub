@@ -31,6 +31,5 @@ archive/monad-solidity/node_modules/
 contracts-soroban/target/
 
 # Env files (never commit secrets)
-.env
-.env.local
 .env.*.local
+config.bat

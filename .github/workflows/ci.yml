@@ -20,6 +20,15 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Run gas and resource profile harness
+        run: cargo test --test resource_profile -- --nocapture
+      - name: Upload resource profile report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resource-profile-report
+          path: contracts-soroban/**/resource_profile_report.md
+          if-no-files-found: ignore
       - run: cargo build --release --target wasm32v1-none -p payhub-escrow
 
   backend:
